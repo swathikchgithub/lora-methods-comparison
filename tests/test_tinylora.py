@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-from tinylora import TARGET_MODULES, TinyLoRALinear, apply_tinylora
+from tinylora import TARGET_MODULES, TinyLoRALinear, apply_tinylora, save_tinylora, load_tinylora
 
 
 class _FakeLayer(nn.Module):
@@ -91,3 +91,31 @@ def test_different_u_and_rank_still_produce_correct_shapes():
     x = torch.randn(2, 32)
     out = model.layers[0].q_proj(x)
     assert out.shape == (2, 32)
+
+
+def test_save_and_load_round_trip_produces_identical_outputs(tmp_path):
+    # Real usage: reload the SAME pretrained base checkpoint, then
+    # reapply TinyLoRA on top - base weights must match for the
+    # regenerated SVD (and thus outputs) to match. A fresh random
+    # re-init (different base weights) is a different scenario, not a
+    # round-trip, so this test constructs the fresh model from the same
+    # base weights explicitly, the way a real reload would.
+    base_model = _FakeModel(d=16, n_layers=2)
+    fresh_model = _FakeModel(d=16, n_layers=2)
+    fresh_model.load_state_dict(base_model.state_dict())
+
+    model, shared_v = apply_tinylora(base_model, rank=2, u=13, seed=42)
+    with torch.no_grad():
+        shared_v.copy_(torch.randn(13))  # simulate a trained vector
+
+    x = torch.randn(3, 16)
+    original_out = model.layers[0].q_proj(x).clone()
+
+    save_tinylora(shared_v, rank=2, u=13, seed=42,
+                   target_modules=TARGET_MODULES, out_dir=str(tmp_path))
+
+    fresh_model, loaded_v = load_tinylora(fresh_model, str(tmp_path))
+
+    assert torch.allclose(loaded_v, shared_v)
+    reloaded_out = fresh_model.layers[0].q_proj(x)
+    assert torch.allclose(original_out, reloaded_out, atol=1e-6)

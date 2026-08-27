@@ -28,6 +28,8 @@ Efficient forward (never materializes the full d x k delta):
     y = base_linear(x) + delta
 """
 
+import json
+
 import torch
 import torch.nn as nn
 
@@ -47,9 +49,16 @@ class TinyLoRALinear(nn.Module):
             p.requires_grad = False
 
         weight = base_linear.weight.data.float()  # [out_features, in_features]
-        # Randomized low-rank SVD - only computes the top `rank` singular
-        # triplets, far cheaper than a full SVD for these matrix sizes.
-        U, S, V = torch.svd_lowrank(weight, q=rank)
+        # Exact SVD, not torch.svd_lowrank's randomized approximation.
+        # svd_lowrank draws from the global RNG internally with no way to
+        # seed it, so two calls on identical weights give DIFFERENT U/V
+        # (verified by a failing round-trip test) - which would silently
+        # break checkpoint reconstruction, the entire premise of only
+        # saving `v` and a seed. Exact SVD is deterministic and, at these
+        # per-layer matrix sizes, still fast since this runs once per
+        # layer at model-load time, not per training step.
+        U_full, S_full, Vh_full = torch.linalg.svd(weight, full_matrices=False)
+        U, S, V = U_full[:, :rank], S_full[:rank], Vh_full[:rank, :].T
         # U: [out, r], S: [r], V: [in, r]
         self.register_buffer("U", U.to(base_linear.weight.dtype))
         self.register_buffer("S", torch.diag(S).to(base_linear.weight.dtype))
@@ -103,4 +112,34 @@ def apply_tinylora(model, rank=2, u=13, seed=42):
 
     print(f"TinyLoRA: wrapped {replaced} linear layers, "
           f"rank={rank}, u={u}, trainable params={u} (one shared vector)")
+    return model, shared_v
+
+
+def save_tinylora(shared_v, rank, u, seed, target_modules, out_dir):
+    """The checkpoint is genuinely tiny: just the u trainable numbers plus
+    the config needed to regenerate P deterministically at load time -
+    P itself is never saved, since apply_tinylora() reconstructs it
+    byte-for-byte from the same seed. This is the mechanism behind the
+    paper's "13 parameters, 26 bytes" claim - there's nothing else to
+    store."""
+    import os
+    os.makedirs(out_dir, exist_ok=True)
+    torch.save(shared_v.detach().cpu(), f"{out_dir}/tinylora_v.pt")
+    with open(f"{out_dir}/tinylora_config.json", "w") as f:
+        json.dump({"rank": rank, "u": u, "seed": seed,
+                    "target_modules": target_modules}, f, indent=2)
+    print(f"TinyLoRA checkpoint saved to {out_dir} "
+          f"({shared_v.numel()} floats, {shared_v.numel() * 2} bytes in bf16)")
+
+
+def load_tinylora(model, checkpoint_dir):
+    """Reconstruct a TinyLoRA-wrapped model from a saved checkpoint:
+    reapply the same wrapping (regenerating P from the saved seed), then
+    load the trained vector into it."""
+    with open(f"{checkpoint_dir}/tinylora_config.json") as f:
+        config = json.load(f)
+    model, shared_v = apply_tinylora(model, rank=config["rank"], u=config["u"], seed=config["seed"])
+    saved_v = torch.load(f"{checkpoint_dir}/tinylora_v.pt")
+    with torch.no_grad():
+        shared_v.copy_(saved_v)
     return model, shared_v
