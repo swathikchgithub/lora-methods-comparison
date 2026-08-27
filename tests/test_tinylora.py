@@ -93,6 +93,25 @@ def test_different_u_and_rank_still_produce_correct_shapes():
     assert out.shape == (2, 32)
 
 
+def test_all_buffers_match_base_weight_device():
+    # Regression test for a real bug: P was created via torch.randn()
+    # with no device argument, so it silently defaulted to CPU even when
+    # the base model lived on GPU. Training papered over it (Accelerate
+    # moves the whole model, buffers included, to GPU internally), but a
+    # standalone reload for eval never makes that extra call and crashed
+    # on the first forward pass. This can't fully exercise the CUDA path
+    # on CPU-only hardware, but it documents and checks the invariant
+    # that must hold on any device: every buffer lives wherever the base
+    # weight lives, not wherever it happened to be created.
+    model, _ = _build()
+    layer = model.layers[0].q_proj
+    weight_device = layer.base_linear.weight.device
+    assert layer.U.device == weight_device
+    assert layer.S.device == weight_device
+    assert layer.V.device == weight_device
+    assert layer.P.device == weight_device
+
+
 def test_save_and_load_round_trip_produces_identical_outputs(tmp_path):
     # Real usage: reload the SAME pretrained base checkpoint, then
     # reapply TinyLoRA on top - base weights must match for the

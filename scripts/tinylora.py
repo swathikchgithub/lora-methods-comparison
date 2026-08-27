@@ -64,9 +64,17 @@ class TinyLoRALinear(nn.Module):
         self.register_buffer("S", torch.diag(S).to(base_linear.weight.dtype))
         self.register_buffer("V", V.to(base_linear.weight.dtype))
 
+        # Generated on CPU (the seeded generator is CPU-only), then moved
+        # to the base weight's device - determinism comes from the seed,
+        # not from which device generation happens on, so this is safe.
+        # Without the explicit .to(weight.device), P silently stays on
+        # CPU: training papers over this because SFTTrainer/Accelerate
+        # moves the whole model (all buffers included) to GPU internally,
+        # but a standalone reload for eval never makes that extra call,
+        # so P stays stranded on CPU and crashes on the first forward.
         gen = torch.Generator().manual_seed(seed)
         P = torch.randn(u, rank, rank, generator=gen)
-        self.register_buffer("P", P.to(base_linear.weight.dtype))
+        self.register_buffer("P", P.to(device=weight.device, dtype=base_linear.weight.dtype))
 
         self.v = shared_v  # reference, not a copy - this is the tying
 
