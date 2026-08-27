@@ -112,6 +112,15 @@ def test_all_buffers_match_base_weight_device():
     assert layer.P.device == weight_device
 
 
+def test_shared_vector_matches_model_device():
+    # Same bug, different tensor: apply_tinylora's `shared_v =
+    # nn.Parameter(torch.zeros(u))` had the identical CPU-default problem
+    # as P did - caught on the same real-GPU reload, right after fixing P.
+    model, shared_v = _build()
+    weight_device = model.layers[0].q_proj.base_linear.weight.device
+    assert shared_v.device == weight_device
+
+
 def test_save_and_load_round_trip_produces_identical_outputs(tmp_path):
     # Real usage: reload the SAME pretrained base checkpoint, then
     # reapply TinyLoRA on top - base weights must match for the

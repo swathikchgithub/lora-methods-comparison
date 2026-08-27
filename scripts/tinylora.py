@@ -92,14 +92,21 @@ def apply_tinylora(model, rank=2, u=13, seed=42):
     """Replace every target Linear layer in-place with a TinyLoRALinear,
     all sharing one model-wide trainable vector `v` of length u.
 
-    Time: O(L * svd(r)) for L target layers, each a cheap randomized
-    rank-r SVD - not O(full SVD), since torch.svd_lowrank only computes
-    the top r singular triplets.
+    Time: O(L * svd(d, k, r)) for L target layers - an exact SVD per
+    layer, not the randomized approximation (see TinyLoRALinear's
+    docstring for why exactness matters here: determinism, not just
+    speed).
     Space: O(u) trainable (the shared vector) + O(L * r * (d + k)) frozen
     buffers for the per-layer U/V bases - negligible next to the base
     model's own parameter count.
     """
-    shared_v = nn.Parameter(torch.zeros(u))
+    # Match the model's own device explicitly - see the comment on P's
+    # creation in TinyLoRALinear for why this can't be left implicit:
+    # training papers over a CPU-default with Accelerate's internal model
+    # placement, but a standalone reload for eval never gets that same
+    # pass and crashes on the first forward.
+    device = next(model.parameters()).device
+    shared_v = nn.Parameter(torch.zeros(u, device=device))
     replaced = 0
 
     def _recurse(module):
