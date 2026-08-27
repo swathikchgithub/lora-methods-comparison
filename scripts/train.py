@@ -156,6 +156,13 @@ def main():
         metric_for_best_model="eval_loss",
         report_to=["tensorboard"],
         seed=args.seed,
+        # TinyLoRA's shared `v` parameter appears under a different key in
+        # every wrapped layer (the whole point is weight tying - one
+        # tensor, many references). safetensors refuses to serialize a
+        # single storage under multiple keys; pickle-based saving handles
+        # shared references natively. Only needed for tinylora - the
+        # other 4 methods have no tied parameters and save fine either way.
+        save_safetensors=(args.method != "tinylora"),
     )
 
     trainer = SFTTrainer(
